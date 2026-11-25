@@ -11,7 +11,7 @@ TARGET_FPS = 30.0           # Hardware camera frame rate cap (prevents RAM overf
 RESIZE_DIM = (224, 224)     # (width, height) for reduced RAM usage
 WINDOW_SECONDS = 2.0        # Window duration in seconds
 OVERLAP_RATIO = 0.5         # 0.5 = 50% overlap between consecutive windows
-BASE_OUTPUT_DIR = "recordings"
+BASE_OUTPUT_DIR = r"../fNIRS_Basler_recordings/recordings"
 
 
 def create_session_dir(base_dir, subject_id):
