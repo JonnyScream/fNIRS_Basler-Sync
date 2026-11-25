@@ -7,6 +7,7 @@ from pylsl import resolve_byprop, StreamInlet, local_clock
 
 # --- Configuration ---
 FRAMEWORK = "pytorch"       # Options: "pytorch" -> (B, T, C, H, W) | "tensorflow" -> (B, T, H, W, C)
+TARGET_FPS = 30.0           # Hardware camera frame rate cap (prevents RAM overflow)
 RESIZE_DIM = (224, 224)     # (width, height) for reduced RAM usage
 WINDOW_SECONDS = 2.0        # Window duration in seconds
 OVERLAP_RATIO = 0.5         # 0.5 = 50% overlap between consecutive windows
@@ -27,7 +28,7 @@ def audit_sync_quality(frame_ts, fnirs_ts):
     print("\n--- Synchronization & Jitter Audit ---")
     if len(frame_ts) < 2:
         print("Not enough samples collected to compute timing statistics.")
-        return 30.0
+        return TARGET_FPS
 
     frame_diffs = np.diff(frame_ts)
     mean_fps = 1.0 / np.mean(frame_diffs)
@@ -47,14 +48,14 @@ def audit_sync_quality(frame_ts, fnirs_ts):
 
 
 def prepare_training_windows(video_arr, fnirs_arr, fps, window_sec, overlap_ratio, framework):
-    """Normalizes data, slices into time-based windows, and formats tensor dimensions."""
+    """Normalizes fNIRS, slices both modalities into time-based windows, and formats tensor dimensions."""
     # 1. Per-channel Z-score normalization for fNIRS
     mean = np.mean(fnirs_arr, axis=0, keepdims=True)
     std = np.std(fnirs_arr, axis=0, keepdims=True) + 1e-8
     fnirs_norm = (fnirs_arr - mean) / std
 
-    # 2. Scale video pixels to [0, 1] float32 and convert BGR -> RGB
-    video_rgb = video_arr[..., ::-1].astype(np.float32) / 255.0
+    # 2. Convert BGR -> RGB while keeping uint8 to save 75% RAM (normalize by /255.0 inside DataLoader)
+    video_rgb = video_arr[..., ::-1]
 
     # 3. Compute window and step sizes in frames from measured FPS
     window_size = max(1, int(round(window_sec * fps)))
@@ -72,8 +73,8 @@ def prepare_training_windows(video_arr, fnirs_arr, fps, window_sec, overlap_rati
         video_windows.append(video_rgb[start:end])
         fnirs_windows.append(fnirs_norm[start:end])
 
-    X_vid_win = np.array(video_windows)    # Default: (B, T, H, W, C)
-    X_fnirs_win = np.array(fnirs_windows)  # Default: (B, T, Channels)
+    X_vid_win = np.array(video_windows, dtype=np.uint8)       # Default: (B, T, H, W, C)
+    X_fnirs_win = np.array(fnirs_windows, dtype=np.float32)   # Default: (B, T, Channels)
 
     # 4. Adjust layout for target deep learning framework
     if framework.lower() == "pytorch":
@@ -85,94 +86,104 @@ def prepare_training_windows(video_arr, fnirs_arr, fps, window_sec, overlap_rati
 
 
 # --- Main Execution ---
-subject_id = input("Enter Subject / Session ID (e.g., sub01_trial1): ")
-session_dir = create_session_dir(BASE_OUTPUT_DIR, subject_id)
-print(f"Session files will be saved to: {session_dir}")
+if __name__ == "__main__":
+    subject_id = input("Enter Subject / Session ID (e.g., sub01_trial1): ")
+    session_dir = create_session_dir(BASE_OUTPUT_DIR, subject_id)
+    print(f"Session files will be saved to: {session_dir}")
 
-# 1. Connect to fNIRS LSL stream from Aurora
-print("Searching for fNIRS LSL stream from Aurora...")
-streams = resolve_byprop('type', 'NIRS', timeout=10)
-if not streams:
-    raise RuntimeError("No NIRS stream found. Ensure Aurora is open and actively streaming.")
+    # 1. Connect to fNIRS LSL stream from Aurora
+    print("Searching for fNIRS LSL stream from Aurora...")
+    streams = resolve_byprop('type', 'NIRS', timeout=10)
+    if not streams:
+        raise RuntimeError("No NIRS stream found. Ensure Aurora is open and actively streaming.")
 
-fnirs_inlet = StreamInlet(streams)
-print("Successfully connected to fNIRS stream!")
+    fnirs_inlet = StreamInlet(streams[0])
+    print("Successfully connected to fNIRS stream!")
 
-# 2. Connect to Basler camera
-camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
-camera.Open()
-converter = pylon.ImageFormatConverter()
-converter.OutputPixelFormat = pylon.PixelType_BGR8packed
-converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+    # 2. Connect to Basler camera and cap acquisition frame rate
+    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+    camera.Open()
 
-input("Press ENTER to start synchronized recording (Video + fNIRS)...")
-camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+    try:
+        camera.AcquisitionFrameRateEnable.Value = True
+        camera.AcquisitionFrameRate.Value = TARGET_FPS
+        print(f"Camera hardware frame rate capped at {TARGET_FPS} FPS.")
+    except Exception as e:
+        print(f"Warning: Could not set hardware FPS cap ({e}). Running at camera default rate.")
 
-aligned_frames = []
-aligned_fnirs = []
-frame_timestamps = []
-fnirs_timestamps = []
+    converter = pylon.ImageFormatConverter()
+    converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+    converter.OutputBitAlignment.Value = pylon.OutputBitAlignment_MsbAligned
 
-latest_fnirs_sample = None
-latest_fnirs_ts = None
+    input("Press ENTER to start synchronized recording (Video + fNIRS)...")
+    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
 
-print("Recording and aligning in real time... Press 'q' in the video window to stop.")
-try:
-    while camera.IsGrabbing():
-        # Pull most recent fNIRS sample (non-blocking)
-        while True:
-            sample, ts = fnirs_inlet.pull_sample(timeout=0.0)
-            if sample is None:
-                break
-            latest_fnirs_sample = sample
-            latest_fnirs_ts = ts
+    aligned_frames = []
+    aligned_fnirs = []
+    frame_timestamps = []
+    fnirs_timestamps = []
 
-        # Grab frame from Basler camera
-        grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
-        if grabResult.GrabSucceeded() and latest_fnirs_sample is not None:
-            frame_ts = local_clock()
-            img = converter.Convert(grabResult).GetArray()
+    latest_fnirs_sample = None
+    latest_fnirs_ts = None
 
-            if RESIZE_DIM is not None:
-                img = cv2.resize(img, RESIZE_DIM, interpolation=cv2.INTER_AREA)
+    print("Recording and aligning in real time... Click the video window and press 'Q' or 'ESC' to stop.")
+    try:
+        while camera.IsGrabbing():
+            # Pull most recent fNIRS sample (non-blocking)
+            while True:
+                sample, ts = fnirs_inlet.pull_sample(timeout=0.0)
+                if sample is None:
+                    break
+                latest_fnirs_sample = sample
+                latest_fnirs_ts = ts
 
-            aligned_frames.append(img)
-            aligned_fnirs.append(latest_fnirs_sample)
-            frame_timestamps.append(frame_ts)
-            fnirs_timestamps.append(latest_fnirs_ts)
+            # Grab frame from Basler camera
+            grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+            if grabResult.GrabSucceeded() and latest_fnirs_sample is not None:
+                frame_ts = local_clock()
+                img = converter.Convert(grabResult).GetArray()
 
-            cv2.imshow('Synced Recording (Press Q to stop)', img)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        grabResult.Release()
-finally:
-    camera.StopGrabbing()
-    camera.Close()
-    cv2.destroyAllWindows()
+                if RESIZE_DIM is not None:
+                    img = cv2.resize(img, RESIZE_DIM, interpolation=cv2.INTER_AREA)
 
-    X_video = np.array(aligned_frames)
-    X_fnirs = np.array(aligned_fnirs)
-    frame_ts_arr = np.array(frame_timestamps)
-    fnirs_ts_arr = np.array(fnirs_timestamps)
+                aligned_frames.append(img)
+                aligned_fnirs.append(latest_fnirs_sample)
+                frame_timestamps.append(frame_ts)
+                fnirs_timestamps.append(latest_fnirs_ts)
 
-    # Save raw aligned arrays and timestamps inside the session directory
-    np.save(os.path.join(session_dir, "X_video_aligned.npy"), X_video)
-    np.save(os.path.join(session_dir, "X_fnirs_aligned.npy"), X_fnirs)
-    np.save(os.path.join(session_dir, "frame_timestamps.npy"), frame_ts_arr)
-    np.save(os.path.join(session_dir, "fnirs_timestamps.npy"), fnirs_ts_arr)
-    print(f"\nSaved {len(X_video)} raw aligned pairs to {session_dir}")
+                cv2.imshow('Synced Recording (Press Q or ESC to stop)', img)
+                key = cv2.waitKey(5) & 0xFF
+                if key in (ord('q'), ord('Q'), 27):  # 27 = ESC (works in any keyboard language)
+                    break
+            grabResult.Release()
+    finally:
+        camera.StopGrabbing()
+        camera.Close()
+        cv2.destroyAllWindows()
 
-    # Run timing audit and get measured FPS
-    measured_fps = audit_sync_quality(frame_ts_arr, fnirs_ts_arr)
+        X_video = np.array(aligned_frames, dtype=np.uint8)
+        X_fnirs = np.array(aligned_fnirs, dtype=np.float32)
+        frame_ts_arr = np.array(frame_timestamps, dtype=np.float64)
+        fnirs_ts_arr = np.array(fnirs_timestamps, dtype=np.float64)
 
-    # Generate framework-ready sliding windows
-    X_vid_win, X_fnirs_win = prepare_training_windows(
-        X_video, X_fnirs, measured_fps, WINDOW_SECONDS, OVERLAP_RATIO, FRAMEWORK
-    )
+        # Save raw aligned arrays and timestamps inside the session directory
+        np.save(os.path.join(session_dir, "X_video_aligned.npy"), X_video)
+        np.save(os.path.join(session_dir, "X_fnirs_aligned.npy"), X_fnirs)
+        np.save(os.path.join(session_dir, "frame_timestamps.npy"), frame_ts_arr)
+        np.save(os.path.join(session_dir, "fnirs_timestamps.npy"), fnirs_ts_arr)
+        print(f"\nSaved {len(X_video)} raw aligned pairs to {session_dir}")
 
-    if X_vid_win is not None:
-        np.save(os.path.join(session_dir, "X_video_windows.npy"), X_vid_win)
-        np.save(os.path.join(session_dir, "X_fnirs_windows.npy"), X_fnirs_win)
-        print(f"\nSaved windowed tensors ({FRAMEWORK.upper()} layout):")
-        print(f"X_video_windows.npy shape: {X_vid_win.shape}")
-        print(f"X_fnirs_windows.npy shape: {X_fnirs_win.shape}")
+        # Run timing audit and get measured FPS
+        measured_fps = audit_sync_quality(frame_ts_arr, fnirs_ts_arr)
+
+        # Generate framework-ready sliding windows
+        X_vid_win, X_fnirs_win = prepare_training_windows(
+            X_video, X_fnirs, measured_fps, WINDOW_SECONDS, OVERLAP_RATIO, FRAMEWORK
+        )
+
+        if X_vid_win is not None:
+            np.save(os.path.join(session_dir, "X_video_windows.npy"), X_vid_win)
+            np.save(os.path.join(session_dir, "X_fnirs_windows.npy"), X_fnirs_win)
+            print(f"\nSaved windowed tensors ({FRAMEWORK.upper()} layout):")
+            print(f"X_video_windows.npy shape: {X_vid_win.shape} (dtype={X_vid_win.dtype})")
+            print(f"X_fnirs_windows.npy shape: {X_fnirs_win.shape} (dtype={X_fnirs_win.dtype})")
