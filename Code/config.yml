@@ -1,0 +1,28 @@
+# Configuration file for Multimodal Synchronized Recording (Basler Camera + fNIRS + Optional EEG)
+
+experiment:
+  subject_id: ""  # Leave empty ("") to prompt in terminal at runtime, or set e.g. "sub01_trial1"
+  base_output_dir: "../fNIRS_Basler_recordings/recordings"
+  framework: "pytorch"  # Options: "pytorch" -> (B, T, C, H, W) | "tensorflow" -> (B, T, H, W, C)
+
+camera:
+  target_fps: 30.0        # Hardware camera frame rate cap (Hz)
+  resize_dim: [224, 224]  # [width, height] for reduced RAM usage (set to null to keep native resolution)
+
+fnirs:
+  enabled: true
+  stream_type: "NIRS"     # LSL stream type broadcast by NIRx Aurora
+  stream_name: ""         # Optional exact LSL stream name (e.g., "Aurora"); leave empty to match by type
+  expected_srate: 10.17   # Nominal sampling rate in Hz (used for logging/reference)
+  zscore_normalize: true  # Apply per-channel Z-score normalization for training windows
+
+eeg:
+  enabled: false          # Set to true when EEG amplifier LSL stream is active
+  stream_type: "EEG"      # Standard LSL stream type for EEG amplifiers (LiveAmp, g.tec, OpenBCI, etc.)
+  stream_name: ""         # Optional exact LSL stream name; leave empty to match by type
+  expected_srate: 250.0   # Nominal EEG sampling rate in Hz (e.g., 250, 500, 1000)
+  zscore_normalize: true  # Apply per-channel Z-score normalization for training windows
+
+windowing:
+  window_seconds: 2.0     # Duration of each training window in seconds
+  overlap_ratio: 0.5      # 0.5 = 50% overlap between consecutive windows
