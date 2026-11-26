@@ -2,7 +2,7 @@
 
 experiment:
   subject_id: ""  # Leave empty ("") to prompt in terminal at runtime, or set e.g. "sub01_trial1"
-  base_output_dir: "../fNIRS_Basler_recordings/recordings"
+  base_output_dir: "../../fNIRS_Basler_recordings/recordings"
   framework: "pytorch"  # Options: "pytorch" -> (B, T, C, H, W) | "tensorflow" -> (B, T, H, W, C)
 
 camera:
