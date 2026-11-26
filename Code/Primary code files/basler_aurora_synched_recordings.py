@@ -13,7 +13,7 @@ from pylsl import resolve_byprop, StreamInlet, local_clock
 DEFAULT_CONFIG = {
     "experiment": {
         "subject_id": "",
-        "base_output_dir": "../fNIRS_Basler_recordings/recordings",
+        "base_output_dir": "../../fNIRS_Basler_recordings/recordings",
         "framework": "pytorch",
     },
     "camera": {
@@ -28,10 +28,11 @@ DEFAULT_CONFIG = {
         "zscore_normalize": True,
     },
     "eeg": {
-        "enabled": False,
+        "enabled": True,
         "stream_type": "EEG",
         "stream_name": "",
         "expected_srate": 250.0,
+        "num_eeg_channels": 8,
         "zscore_normalize": True,
     },
     "windowing": {
@@ -195,7 +196,7 @@ def prepare_training_windows(
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Synchronized Basler + fNIRS (+ optional EEG) Recorder")
+    parser = argparse.ArgumentParser(description="Synchronized Basler + fNIRS + Unicorn EEG Recorder")
     parser.add_argument("--config", type=str, default="config.yml", help="Path to YAML configuration file")
     args = parser.parse_args()
 
@@ -213,6 +214,7 @@ if __name__ == "__main__":
     resize_dim = tuple(cam_cfg["resize_dim"]) if cam_cfg["resize_dim"] else None
     window_seconds = float(win_cfg["window_seconds"])
     overlap_ratio = float(win_cfg["overlap_ratio"])
+    num_eeg_channels = eeg_cfg.get("num_eeg_channels", 8)
 
     subject_id = str(exp_cfg.get("subject_id", "")).strip()
     if not subject_id:
@@ -232,13 +234,13 @@ if __name__ == "__main__":
         label="fNIRS (Aurora)",
     )
 
-    # 2. Optionally connect to EEG LSL stream (runs in separate EEG acquisition software)
+    # 2. Connect to Unicorn EEG LSL stream (runs in Unicorn Recorder / UnicornLSL)
     eeg_inlet = None
     if eeg_cfg.get("enabled", False):
         eeg_inlet = connect_lsl_stream(
             stream_type=eeg_cfg["stream_type"],
             stream_name=eeg_cfg.get("stream_name", ""),
-            label="EEG",
+            label="Unicorn EEG",
         )
 
     # 3. Connect to Basler camera and cap acquisition frame rate
@@ -256,7 +258,7 @@ if __name__ == "__main__":
     converter.OutputPixelFormat = pylon.PixelType_BGR8packed
     converter.OutputBitAlignment.Value = pylon.OutputBitAlignment_MsbAligned
 
-    active_modalities = "Video + fNIRS" + (" + EEG" if eeg_inlet is not None else "")
+    active_modalities = "Video + fNIRS" + (" + Unicorn EEG" if eeg_inlet is not None else "")
     input(f"Press ENTER to start synchronized recording ({active_modalities})...")
     camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
 
@@ -282,7 +284,7 @@ if __name__ == "__main__":
                 latest_fnirs_sample = sample
                 latest_fnirs_ts = ts
 
-            # Pull all available high-rate EEG samples in chunks (non-blocking)
+            # Pull all available high-rate Unicorn EEG samples in chunks (non-blocking)
             if eeg_inlet is not None:
                 samples, timestamps = eeg_inlet.pull_chunk(timeout=0.0)
                 if timestamps and latest_fnirs_sample is not None:
@@ -328,10 +330,14 @@ if __name__ == "__main__":
         eeg_ts_arr = None
         if eeg_inlet is not None and len(eeg_samples_all) > 0:
             X_eeg_raw = np.array(eeg_samples_all, dtype=np.float32)
+            # Keep only the 8 physical EEG channels (drops Unicorn aux/accel/battery channels if 17 are sent)
+            if num_eeg_channels and X_eeg_raw.shape[1] > num_eeg_channels:
+                print(f"Slicing EEG channels: keeping first {num_eeg_channels} of {X_eeg_raw.shape[1]} LSL channels.")
+                X_eeg_raw = X_eeg_raw[:, :num_eeg_channels]
             eeg_ts_arr = np.array(eeg_timestamps_all, dtype=np.float64)
             np.save(os.path.join(session_dir, "X_eeg_raw.npy"), X_eeg_raw)
             np.save(os.path.join(session_dir, "eeg_timestamps.npy"), eeg_ts_arr)
-            print(f"Saved {len(X_eeg_raw)} raw high-rate EEG samples to {session_dir}")
+            print(f"Saved {len(X_eeg_raw)} raw high-rate EEG samples ({X_eeg_raw.shape[1]} channels) to {session_dir}")
 
         measured_fps = audit_sync_quality(frame_ts_arr, fnirs_ts_arr, eeg_ts_arr, target_fps=target_fps)
 

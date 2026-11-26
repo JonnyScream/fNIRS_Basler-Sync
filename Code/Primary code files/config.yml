@@ -1,4 +1,4 @@
-# Configuration file for Multimodal Synchronized Recording (Basler Camera + fNIRS + Optional EEG)
+# Configuration file for Multimodal Synchronized Recording (Basler Camera + NIRx fNIRS + Unicorn EEG)
 
 experiment:
   subject_id: ""  # Leave empty ("") to prompt in terminal at runtime, or set e.g. "sub01_trial1"
@@ -17,10 +17,11 @@ fnirs:
   zscore_normalize: true  # Apply per-channel Z-score normalization for training windows
 
 eeg:
-  enabled: false          # Set to true when EEG amplifier LSL stream is active
-  stream_type: "EEG"      # Standard LSL stream type for EEG amplifiers (LiveAmp, g.tec, OpenBCI, etc.)
-  stream_name: ""         # Optional exact LSL stream name; leave empty to match by type
-  expected_srate: 250.0   # Nominal EEG sampling rate in Hz (e.g., 250, 500, 1000)
+  enabled: true           # Enabled for g.tec Unicorn Hybrid Black EEG
+  stream_type: "EEG"      # Standard LSL stream type broadcast by Unicorn Recorder / UnicornLSL
+  stream_name: ""         # Leave empty to auto-detect ("UnicornRecorderLSLStream" or "Unicorn")
+  expected_srate: 250.0   # Unicorn Hybrid Black fixed sampling rate (250 Hz)
+  num_eeg_channels: 8     # Keeps first 8 EEG channels (drops Unicorn accel/gyro/battery aux channels if 17 are sent)
   zscore_normalize: true  # Apply per-channel Z-score normalization for training windows
 
 windowing:
